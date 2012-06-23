@@ -1,10 +1,36 @@
 #!/bin/bash
+# 
+# Install an legacy version of Firefox Web Browser on your system.
+# This practice can be useful for webpage testing.
+# This script will not override the system installed firefox.
+# 
 # author: Carlos Eduardo Alves
 # since: 2012-06-20
-# version: 1.0
+# version: 1.1
 # license: LGPL v2+
 # 
-# tested in: ubuntu-11.04-amd64, ubuntu-12.04-i386
+# tested in: ubuntu-11.04-amd64, ubuntu-12.04-i386, ubuntu-12.04-amd64
+# dependencies: firefox
+
+################################################################################
+##  CONFIGURATIONS                                                            ##
+################################################################################
+#version to name components
+#see (http://www.mozilla.org/en-US/firefox/all-older.html)
+version="3.6"
+build="3.6.28"
+lang="en-US" #or other like pt-BR, es-ES, de... see site
+
+tarball="firefox-$build.tar.bz2"
+url="http://download.mozilla.org/?product=firefox-$build&os=linux&lang=$lang"
+
+#provide multiple instances as system default?
+multiple_instances=true
+bin="/usr/local/sbin" #to override firefox executable in $PATH
+
+################################################################################
+##  END CONFIGURATIONS                                                        ##
+################################################################################
 
 if test "`id -un`" != "root"
 then
@@ -13,50 +39,48 @@ then
     exit $?
 fi
 
-#find file location
-dir=`dirname "$0"`
-cd "$dir"
-dir="$PWD"
-cd "$OLDPWD"
-
-#version to name components
-version="3.6"
-#tarball to install
-tarball="$dir/firefox-3.6.28.tar.bz2"
-#url to download tarball
-url="http://download.mozilla.org/?product=firefox-3.6.28&os=linux&lang=pt-BR"
-
-#provide multiple instances by default?
-multiple_instances=true
-#first path (to override firefox executable in $PATH)
-bin="/usr/local/sbin"
-
-#firefox & legacy versions
-firefox="`which firefox`"
-legacy="$firefox-$version"
-
-
 #check for ld-linux or install ia32-libs
-if ! test -e "/lib/ld-linux.so.2"
+ldlinux="/lib/ld-linux.so.2"
+if ! test -e "$ldlinux"
 then
     echo "It seems that you are running on amd64, trying to install ia32-libs" >&2
     software-properties-gtk -e universe
     apt-get update
     apt-get install ia32-libs
-    if test "$?" != "0"
+    if test "$?" != "0" -o ! -e "$ldlinux"
     then
         echo "Error when installing ia32-libs" >&2
+        echo "Please provide '$ldlinux' to run firefox legacy" >&2
         exit 1
     fi
 fi
 
 
+#find current script location
+dir=`dirname "$0"`
+cd "$dir"
+dir="$PWD"
+cd "$OLDPWD"
+
+#firefox & legacy versions
+firefox="`which firefox`"
+# get the really last executable... (because of multiple_instances feature)
+for folder in ${PATH//':'/ }
+do
+    if test -x "$folder/firefox"
+    then
+        firefox="$folder/firefox"
+    fi
+done
+legacy="$firefox-$version"
+
 #download tarball if needed
+tarball="$dir/$tarball"
 if ! test -e "$tarball"
 then
     echo "Tarball not found, downloading"
     wget -c "$url" -O "$tarball.part"
-    if test "$?" = "0"
+    if test "$?" = "0" -a -s "$tarball.part"
     then
         mv "$tarball.part" "$tarball"
         chmod 777 "$tarball"
@@ -69,7 +93,7 @@ fi
 #unpack tarball
 tar -jxf "$tarball" -C "/opt" #bzip2
 #tar -zxf "$tarball" -C "/opt" #gzip
-if test "$?" != "0"
+if test "$?" != "0" -o ! -d "/opt/firefox"
 then
     echo "Error while unpacking" >&2
     exit 1
@@ -85,18 +109,18 @@ test -e "$profile" || mkdir -p "$profile"
 ' > "$legacy"
 chmod +x "$legacy"
 
-#create launcher
+#create launcher based on system installed Firefox launcher
 launcher="/usr/share/applications/firefox"
 cat "$launcher.desktop" |
     while read line
     do
-        if test "$line" != "${line#Exec}"
+        if test "$line" != "${line#Exec}" #start with "Exec"
         then
             echo "${line/firefox/firefox-$version}"
         elif test "$line" != "${line#Name}" \
-               -a "$line" != "${line//Firefox}"
+               -a "$line" != "${line//Firefox}" #contain this word
         then
-            echo "$line ($version)"
+            echo "$line ($version)" #add version mark to the name
         else
             echo "$line"
         fi
