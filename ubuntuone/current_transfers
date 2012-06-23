@@ -1,0 +1,116 @@
+#!/bin/bash
+# 
+# Show graphically the current download/upload process in ubuntuone
+# 
+# author: Carlos Eduardo Alves
+# 
+# dependencies: ubuntuone-client, zenity, xdg-utils
+
+
+update_interval=10
+debug=false
+
+see_transfers(){
+    up=false
+    dw=false
+    
+    u1sdtool --current-transfers |
+        while read line
+        do
+            exp1="${line%%':'*}"
+            exp2="${line##*': '}"
+            if $debug
+            then
+                echo -e "\e[41m$exp1\e[m: \e[42m$exp2\e[m" >&2
+            fi
+            case "$exp1" in
+            'Current uploads')
+                up=true
+                dw=false
+                ;;
+            'Current downloads')
+                up=false
+                dw=true
+                ;;
+            'path')
+                path="$exp2"
+                total=0
+                done=0
+                ;;
+            'deflated size')
+                total="$exp2"
+                size=$(echo "scale=2; $total/1024/1024" | bc 2>/dev/null)
+                test "${size:0:1}" = "." && size="0$size"
+                ;;
+            'bytes written'|'bytes read')
+                done="$exp2"
+                test "$done" -eq "$done" 2>/dev/null || done=0 #is integer?
+                echo "$path" #ful path
+                echo "${path##*/}" #filename
+                if test "`echo "$total == $total && $size == $size" | bc 2>/dev/null`" = 1 #are integer?
+                then
+                    echo $(( $done * 100 / $total ))"% of $size"M #percent
+                else
+                    echo "N/A"
+                fi
+                #status:
+                if $up
+                then
+                    echo "Up"
+                elif $dw
+                then
+                    echo "Down"
+                else
+                    echo ""
+                fi
+                if $debug
+                then
+                    echo "path='$path'" >&2
+                    echo "done='$done' bytes of '$total'" >&2
+                    echo "up=$up" >&2
+                    echo "" >&2
+                fi
+                ;;
+            esac
+            
+        done |
+        (
+        zenity --list \
+            --title="Current transfers" \
+            --width=500 \
+            --height=400 \
+            --timeout="$update_interval" \
+            --ok-label="OK" \
+            --cancel-label="Close" \
+            --text "<b>Current transfers</b>" \
+            --column="full path" --column="filename" \
+            --column="percent" --column "status"\
+            --print-column=1 --hide-column=1 \
+            --hide-header 2>/dev/null
+        )
+}
+
+_do_recursive(){
+    selected="`see_transfers`"
+    err=$?
+    if $debug
+    then
+        echo "$err: '$selected'" >&2
+    fi
+    
+    if test "$selected" -a "$selected" != "(null)"
+    then
+        if test -e "$selected"
+        then
+            xdg-open "$selected"
+        else
+            zenity --error --title "Error" --text "File not found!"
+        fi
+    elif test "$err" = "5"
+    then
+        _do_recursive
+    fi
+}
+
+_do_recursive
+

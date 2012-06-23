@@ -1,0 +1,34 @@
+#!/bin/bash
+# 
+# u1rescan: Rescan from stratch all subscribed folders
+# 
+# author: Carlos Eduardo Alves
+# since: 2012-06-04
+# 
+# dependencies: ubuntuone-client
+
+oldIFS="$IFS"
+IFS="$IFS="
+echo "scaning folders..."
+u1sdtool --list-folders | tail -n +1 |
+    while read id id subscribed subscribed path path
+    do
+        if test "$subscribed" = "True"
+        then
+            echo -e "rescaning '\e[42m$path\e[m' ($id)"
+            u1sdtool --rescan-from-scratch="$id"
+        fi
+    done
+echo "scaning shares..."
+u1sdtool --list-shares | tail -n +1 |
+    while read id id name name accepted accepted subscribed subscribed access_level access_level from from
+    do
+        if test "$subscribed" = "True"
+        then
+            path="`ls -d "$HOME/Ubuntu One/Shared With Me/"* | grep "$id"`"
+            echo -e "rescaning '\e[42m$path\e[m'"
+            u1sdtool --rescan-from-scratch="$id"
+        fi
+    done
+IFS="$oldIFS"
+
