@@ -1,0 +1,272 @@
+#!/bin/bash
+# 
+# Show an checklist with info about your project
+# Autor: Carlos Eduardo Alves
+# Version: 1.0
+# Tested in: Ubuntu 11.10, 12.04
+# Dependencies: zenity, subversion, coreutils
+
+local_project="/var/www/cobalto"
+
+get_direction(){
+    local direction
+}
+
+nl=$'\n'
+limit=80
+oldIFS="$IFS"
+IFS="$nl"
+selection="`
+    svn st --show-updates "$local_project" 2>&1 |
+        while read line
+        do
+            direction=""
+            case "${line:0:1}" in #Says if item was added, deleted, or otherwise changed
+            'A') #Added
+                direction=Ci
+                ;;
+            'C') #Conflicted
+                direction=Conflict
+                ;;
+            'D') #Deleted
+                direction=Del
+                ;;
+            'M') #Modified
+                direction=Ci
+                ;;
+            'R') #Replaced
+                direction=Replaced
+                ;;
+            '?') #item is not under version control
+                direction=Add
+                ;;
+            '!') #item is missing (removed by non-svn command) or incomplete
+                direction=Del
+                ;;
+            's') #svn: OPTIONS de 'URL?': Não é possível resolver o nome de host 'DOMAIN?': Não há endereço associado com o nome (DOMAIN?)
+                echo $'false\nError#Error\nError'
+                if test "${line:0:4}" = "svn:"
+                then
+                    echo "${line:5}"
+                else
+                    echo "$line"
+                fi
+                continue
+                ;;
+            esac
+            case "${line:1:1}" in #Modifications of a file´s or directory´s properties
+            'C') #Conflicted
+                direction=Conflict
+                ;;
+            'M') #Modified
+                direction=Ci
+                ;;
+            esac
+            case "${line:2:1}" in #Whether the working copy directory is locked
+            'L')
+                direction=Lock
+                ;;
+            esac
+            case "${line:3:1}" in #Scheduled commit will contain addition-with-history
+            '+') #history scheduled with commit
+                direction=Ci
+                ;;
+            esac
+            case "${line:4:1}" in #Whether the item is switched or a file external
+            'S') #the item has a Switched URL relative to the parent
+                test "$direction" || direction='S?'
+                ;;
+            'X') #a versioned file created by an eXternals definition
+                test "$direction" || direction='X?'
+                ;;
+            esac
+            case "${line:5:1}" in #Repository lock token
+            'K') #lock token present || locked in repository, lock toKen present
+                direction=Lock
+                ;;
+            'O') #locked in repository, lock token in some Other working copy
+                direction=Lock
+                ;;
+            'T') #locked in repository, lock token present but sTolen
+                direction=Lock
+                ;;
+            'B') #not locked in repository, lock token present but Broken
+                direction=Lock
+                ;;
+            esac
+            case "${line:6:1}" in #Repository lock token
+            'C') #tree-Conflicted
+                direction=Conflict
+                ;;
+            '>') #line explaning about previous conflict (ex.: local edit, incoming delete upon update)
+                continue
+                ;;
+            esac
+            case "${line:8:1}" in #out-of-date information
+            '*') #a newer revision exists on the server
+                direction=Up
+                ;;
+            esac
+            
+            item="${line:21}"
+            if test "$direction" = "Up" -a "$item" = "${item##*.tar.gz}"
+            then
+                status=true
+            else
+                status=false
+            fi
+            if test "$item" -a "$direction"
+            then
+                echo "$status"
+                echo "$direction#$item"
+                echo "$direction"
+                if test "${#item}" -gt "$limit"
+                then
+                    itemsize="${#item}"
+                    name="${item##*/}"
+                    namesize="${#name}"
+                    diff=$(( $limit - $namesize - 1 - 3 ))
+                    prefix="${item:0:$diff}"
+                    echo "$prefix.../$name"
+                else
+                    echo "$item"
+                fi
+            fi
+        done |
+        zenity --list --checklist --separator "$nl" \
+            --title "Actions to execute" --text "Select itens to update, add, delete or commit" \
+            --ok-label="Execute" --cancel-label="Ignore" \
+            --width 700 --height 500 \
+            --hide-column 2 --print-column 2 \
+            --column '' --column 'command' --column 'Act.' --column 'File' 2>/dev/null
+    `"
+IFS="$oldIFS"
+
+upd_selection=`echo "$selection" | grep -E "^Up#" | cut -d"#" -f2`
+add_selection=`echo "$selection" | grep -E "^Add#" | cut -d"#" -f2`
+del_selection=`echo "$selection" | grep -E "^Del#" | cut -d"#" -f2`
+ci_selection=`echo "$selection" | grep -E "^Ci#" | cut -d"#" -f2`
+
+
+if test "$add_selection""$del_selection""$ci_selection"
+then
+    account="`
+        zenity --forms --separator="$nl" \
+            --title "SVN user and password" --text "Account details" \
+            --add-entry="User name:" --add-password="User pasword:"
+        `"
+    username="`echo "$account" | head -1`"
+    password="`echo "$account" | tail -1`"
+    
+    if test "$username"
+    then
+        account=( --username "$username" --password "$password" )
+    else
+        account=( )
+    fi
+    
+    if ! test "$COMMIT_COMMENT"
+    then
+        if test -f "$HOME/.subversion/lastcomment"
+        then
+            COMMIT_COMMENT="`cat "$HOME/.subversion/lastcomment"`"
+        fi
+        COMMIT_COMMENT="`
+            echo -n "$COMMIT_COMMENT" |
+                zenity --text-info --title "Enter Commit comment" \
+                    --editable --window-icon question \
+                    --width 700 --height 500
+            `"
+        mkdir -p "$HOME/.subversion/"
+        echo "$COMMIT_COMMENT" > "$HOME/.subversion/lastcomment"
+    fi
+    
+fi
+
+parse_svn_messages(){
+    local IFS="$nl"
+    while read line
+    do
+        case "$line" in
+        "Atualizado para"*|"Updated to"*)
+            echo "$line"
+            ;;
+        *)
+            echo "#$line"
+            echo "$line"
+            ;;
+        esac
+    done
+}
+
+if test "$upd_selection"
+then
+    update="`
+        svn update $upd_selection |
+            parse_svn_messages |
+            tee >(
+                zenity --progress --title "Updating" --text "Progress" \
+                    --window-icon info \
+                    --width 700 --height 50 \
+                    --pulsate \
+                    --auto-close --auto-kill ||
+                zenity --error --text "Error while updating, try again" && exit
+                ) |
+            tail -1`"
+    zenity --info --title "Update complete" --text "$update" --window-icon info
+fi
+
+if test "$add_selection"
+then
+    svn add $add_selection |
+            parse_svn_messages |
+            zenity --progress --title "Adding itens" --text "Progress" \
+                --window-icon info \
+                --width 700 --height 50 \
+                --pulsate \
+                --auto-close --auto-kill ||
+                zenity --error --text "Error while adding, try again" && exit
+fi
+
+if test "$del_selection"
+then
+    svn del $del_selection |
+            parse_svn_messages |
+            zenity --progress --title "Deleting itens" --text "Progress" \
+                --window-icon info \
+                --width 700 --height 50 \
+                --pulsate \
+                --auto-close --auto-kill ||
+                zenity --error --text "Error while deleting, try again" && exit
+fi
+
+if test "$add_selection""$del_selection""$ci_selection"
+then
+    #total_itens=`echo "$ci_selection" | wc -l`
+    commit="`
+        svn commit -m "$COMMIT_COMMENT" \
+            "${account[@]}" --no-auth-cache \
+            $add_selection $del_selection $ci_selection |
+            tee >(
+                parse_svn_messages |
+                zenity --progress --title "Commiting" --text "Progress" \
+                    --window-icon info \
+                    --width 700 --height 50 \
+                    --pulsate \
+                    --auto-close --auto-kill ||
+                zenity --error --text "Error while commiting, try again" && exit
+                ) |
+            tail -1`"
+    zenity --info --title "Commit complete" --text "$commit" --window-icon info
+fi
+
+
+
+
+
+
+
+
+
+
+
