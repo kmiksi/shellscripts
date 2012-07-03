@@ -1,0 +1,442 @@
+#!/bin/bash
+# 
+# Gui to manage services installed in system
+# 
+# author: Carlos Eduardo Alves
+# since: 2012-06-23
+# 
+# dependencies: sysvinit-utils (service), sysv-rc (update-rc.d), zenity
+# 
+# TODO: parse upstart in /etc/init/* ?
+
+
+if test "`id -un`" != "root"
+then
+    if which gksu &>/dev/null
+    then
+        gksu -- bash "$0"
+        exit $?
+    else
+        sudo bash "$0"
+        exit $?
+    fi
+fi
+
+
+QUIET=false
+
+# new line, used in substrings and zenity
+n='
+'
+
+
+# Get status based on individual service status call.
+# Env. vars: service
+# Env. vars provided: status
+# Return: sucess or failure
+detailed_run_status(){
+    local err
+    status="`service "$service" status 2>&1`"
+    err=$?
+    case "$status" in
+    "mongodb stop/waiting"*)
+        if test -e "/var/lib/mongodb/mongod.lock"
+        then
+            echo "WARNING: mongodb: seams not running but locked, removing lock file" >&2
+            service mongodb stop &>/dev/null
+            rm -f "/var/lib/mongodb/mongod.lock"
+        fi
+        status=false
+        ;;
+    "$service start/running"*)
+        status=true
+        ;;
+    "$service disabled"*|"$service stop/waiting"*)
+        status=false
+        ;;
+    "Usage: "*)
+        echo "ERROR: $service ($err): '$status' [INCORRECT USAGE]" >&2
+        return 1
+        ;;
+    *)
+        case "$service $status" in
+        "postgresql Running clusters: "|"virtualbox"*"is not loaded.")
+            status=false
+            ;;
+        "postgresql Running clusters: "*|"virtualbox"*"are loaded.")
+            status=true
+            ;;
+        *)
+            echo "ERROR: $service ($err): '$status' [UNKNOWN]" >&2
+            return 1
+        esac
+        ;;
+    esac
+    return 0
+}
+
+# Provide a list of status:service
+get_run_list(){
+    local x status service
+    service --status-all 2>&1 |
+        while read x status x service
+        do
+            case "$status $service" in
+            "+ postgre"*)
+                detailed_run_status || continue
+                ;;
+            "+"*)
+                status=true
+                ;;
+            "-"*)
+                status=false
+                ;;
+            *)
+                detailed_run_status || continue
+                ;;
+            esac
+            echo "$status:$service"
+        done
+}
+
+# Start/Stop services based on user options. Unrecognized statuses
+# will be hided from list and, in verbose, will output info to stderr.
+# Messages of actions will also be outputed to stderr
+# Env. vars: QUIET
+start_stop(){
+    local status_list to_run err first_service last_service status service action
+    
+    if $QUIET
+    then
+        status_list=`get_run_list 2>/dev/null`
+    else
+        status_list=`get_run_list`
+    fi
+    
+    to_run=$(
+        echo "${status_list//:/$n}" |
+            zenity --list --checklist \
+            --title "Runing services" --text "Start/Stop services" \
+            --width 400 --height 700 \
+            --separator "$n" \
+            --column running --column service \
+            2>/dev/null
+        )
+    err=$?
+
+    if test "$err" = "0"
+    then
+        first_service=`echo "$status_list" | head -1 | cut -d":" -f2`
+        last_service=`echo "$status_list" | tail -1 | cut -d":" -f2`
+        echo "${status_list//:/ }" |
+            while read status service
+            do
+                action=""
+                if echo "$to_run" | grep -E "^$service$" >/dev/null
+                then
+                    $status || action=start
+                else
+                    $status && action=stop
+                fi
+                perform_action
+            done |
+                (
+                    zenity --progress \
+                    --title "Aplying changes" \
+                    --width 400 --height 100 \
+                    --no-cancel \
+                    2>/dev/null
+                )
+    fi
+}
+
+# Do an action in a service and print info for zenity progress integration.
+# Messages of actions will also be outputed to stderr
+# Env. vars: action service [first_service] [last_service]
+perform_action(){
+    local message call
+    if test "$action"
+    then
+        case "$action" in
+        start|stop)
+            message="$service: ${action}ing"
+            call=service
+            ;;
+        enable|disable)
+            message="$service: ${action:0:-1}ing"
+            call=update-rc.d
+            ;;
+        *)
+            message="ERROR: unrecognized action for $service"
+            call=false
+            ;;
+        esac
+        echo "#$message..."
+        echo 10
+        echo "$message" >&2
+        $call "$service" $action >&2
+    fi
+    
+    if test "$service" = "$first_service"
+    then
+        echo "#loading"
+        echo 0
+    elif test "$service" = "$last_service"
+    then
+        echo "#FINISHED: all done"
+        echo 100
+    else
+        echo "#$service done"
+        echo 95
+    fi
+}
+
+# Make an ls imploded by ", "
+# Return sucess or failure
+imploded_ls(){
+    local files file
+    files="`ls "$@" 2>/dev/null |
+        while read file
+        do
+            echo -n "$file, "
+        done`"
+    if test "${#files}" -ge 2
+    then
+        echo "${files:0:-2}"
+    else
+        return 1
+    fi
+}
+
+# List initd scripts imploded by ", "
+# Usage: initd_scripts STATUS SERVICE
+#                      STATUS: K, S or KS
+#                      SERVICE: service name
+# Return sucess or failure
+initd_scripts(){
+    local files file
+    files="`ls /etc/rc[0-9S].d/[$1]??"$2" 2>/dev/null |
+        while read file
+        do
+            file="${file:5:3} ${file:11:3}"
+            echo -n "$file, "
+        done`"
+    if test "${#files}" -ge 2
+    then
+        echo "${files:0:-2}"
+    else
+        return 1
+    fi
+}
+
+# Get a list of services enabled/disabled from system boot.
+# Services that contain no SysV init scripts, will be marked as disabled
+get_enabled_list(){
+    local service status links link
+    ls "/etc/init.d/" 2>/dev/null |
+        grep -v README |
+        while read service
+        do
+            if links="`initd_scripts S "$service"`"
+            then
+                links="`initd_scripts SK "$service"`"
+                status=true
+            else
+                links="`initd_scripts K "$service"`" ||
+                echo "WARNING: $service: no SysV links found, assuming disabled" >&2
+                status=false
+            fi
+            echo "$status:$service:$links"
+        done
+}
+
+# Enable/Disable services based on user options.
+# In verbose mode, warnings will be optputted to stderr.
+# Messages of actions will also be outputed to stderr
+# Env. vars: QUIET n
+enable_disable(){
+    local status_list to_run err first_service last_service service status links
+    
+    if $QUIET
+    then
+        status_list=`get_enabled_list 2>/dev/null`
+    else
+        status_list=`get_enabled_list`
+    fi
+    
+    to_run=$(
+        echo "${status_list//:/$n}" |
+            zenity --list --checklist \
+            --title "Services" --text "Enable/Disable services" \
+            --width 400 --height 700 \
+            --separator "$n" \
+            --column enabled --column service --column links \
+            2>/dev/null
+        )
+    err=$?
+    
+    if test "$err" = "0"
+    then
+        first_service=`echo "$status_list" | head -1 | cut -d":" -f2`
+        last_service=`echo "$status_list" | tail -1 | cut -d":" -f2`
+        echo "${status_list//:/ }" |
+            while read status service links
+            do
+                action=""
+                if echo "$to_run" | grep -E "^$service$" >/dev/null
+                then
+                    $status || action=enable
+                else
+                    $status && action=disable
+                fi
+                perform_action
+            done |
+                (
+                    zenity --progress \
+                    --title "Aplying changes" \
+                    --width 400 --height 100 \
+                    --no-cancel \
+                    2>/dev/null
+                )
+    fi
+}
+
+# Deprecated
+# Usage: list_rc_scripts LEVEL
+# Env. vars: service
+list_rc_scripts(){
+    local files file
+    files="`ls /etc/rc$1.d/[SK]??"$service" 2>/dev/null |
+        while read file
+        do
+            echo "${file:11:3}"
+        done`"
+    echo "$files"
+}
+
+# Deprecated
+# Usage: get_rc_scripts SERVICE
+get_rc_scripts(){
+    local service="$1"
+    list_rc_scripts S #all (S)
+    list_rc_scripts 1 #single (1)
+    list_rc_scripts 2 #rc2
+    list_rc_scripts 3 #rc3
+    list_rc_scripts 4 #rc4
+    list_rc_scripts 5 #rc5
+    list_rc_scripts 6 #reboot (6)
+    list_rc_scripts 0 #halt (0)
+}
+
+# Enable/Disable services based on user options. (Version 2, detailed)
+# In verbose mode, warnings will be optputted to stderr.
+# Messages of actions will also be outputed to stderr
+# Env. vars: QUIET n
+enable_disable2(){
+    local status_list to_run line i err first_service last_service service status links
+    
+    if $QUIET
+    then
+        status_list=`get_enabled_list 2>/dev/null`
+    else
+        status_list=`get_enabled_list`
+    fi
+    
+    to_run=$(
+        echo "$status_list" |
+            while read line
+            do
+                echo "${line//:/$n}"
+                #get_rc_scripts "`echo "$line" | cut -d":" -f2`"
+                line="`echo "$line" | cut -d":" -f3`"
+                line="${line//, /$n}"
+                for i in S 1 2 3 4 5 6 0
+                do
+                    echo "$line" |
+                        grep -E "^rc$i " || echo
+                done |
+                    cut -d" " -f2
+            done |
+            zenity --list --checklist \
+            --title "Services" --text "Enable/Disable services" \
+            --width 750 --height 700 \
+            --separator "$n" \
+            --hide-column 3 \
+            --column enabled --column service --column links \
+            --column all \
+            --column single \
+            --column rc2 \
+            --column rc3 \
+            --column rc4 \
+            --column rc5 \
+            --column reboot \
+            --column halt \
+            2>/dev/null
+        )
+    err=$?
+    
+    if test "$err" = "0"
+    then
+        first_service=`echo "$status_list" | head -1 | cut -d":" -f2`
+        last_service=`echo "$status_list" | tail -1 | cut -d":" -f2`
+        echo "${status_list//:/ }" |
+            while read status service links
+            do
+                action=""
+                if echo "$to_run" | grep -E "^$service$" >/dev/null
+                then
+                    $status || action=enable
+                else
+                    $status && action=disable
+                fi
+                perform_action
+            done |
+                (
+                    zenity --progress \
+                    --title "Aplying changes" \
+                    --width 400 --height 100 \
+                    --no-cancel \
+                    2>/dev/null
+                )
+    fi
+}
+
+reload_this(){
+    sleep 2
+    clear
+    echo "`date`: reloading script" 2>/dev/null
+    bash "$0"
+    exit $?
+}
+
+# Env. vars: QUIET
+change_quiet(){
+    $QUIET && QUIET=false || QUIET=true
+}
+
+while true
+do
+    $QUIET && change="Verbose" || change="Quiet"
+    
+    $(
+        zenity --list \
+        --title "Menu" --text "Select an option" \
+        --width 600 --height 500 \
+        --separator "$n" \
+        --hide-column 1 --print-column 1 --hide-header \
+        --column cmd --column option \
+        start_stop "Start/Stop services" \
+        enable_disable "Enable/Disable services" \
+        enable_disable2 "Enable/Disable services (Detailed)" \
+         \
+         \
+         \
+         \
+         \
+        change_quiet "$change" \
+        break "Exit" \
+        reload_this "Reload script" \
+        2>/dev/null
+    )
+    
+done
